@@ -1,5 +1,5 @@
-github.com/songgao/water v0.0.0-20190725173103-fd331bda3f4b h1:+y4hCMc/WKsDbAPsOQZgBSaSZ26uh2afyaWeVg/3s/c=
-github.com/songgao/water v0.0.0-20190725173103-fd331bda3f4b/go.mod h1:P5HUIBuIWKbyjl083/loAegFkfbFNx5i2qEP4CNbm7E=
+github.com/cpu100/water v0.0.0-20200317203138-2b4b6d7c09d8 h1:e/wLJivbgao38/J/PqLbcgO5pzLsi/Nz7UyHunmz5H0=
+github.com/cpu100/water v0.0.0-20200317203138-2b4b6d7c09d8/go.mod h1:nNPNB4JVYZVfrK2VJot/DQuG3b2Z+jnSyQvvhFfKxt0=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
 golang.org/x/net v0.0.0-20191021144547-ec77196f6094 h1:5O4U9trLjNpuhpynaDsqwCk+Tw6seqJz1EbqbnzHrc8=
 golang.org/x/net v0.0.0-20191021144547-ec77196f6094/go.mod h1:z5CRVTTTmAJ677TzLLGU+0bjPO0LkuOLi4/5GtJWs/s=
