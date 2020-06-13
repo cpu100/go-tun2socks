@@ -15,7 +15,9 @@ import (
     "errors"
     "fmt"
     "io"
+    "log"
     "net"
+    "runtime"
     "sync"
     "time"
     "unsafe"
@@ -41,12 +43,19 @@ func (conn *TCPConn) WriteTo(w io.Writer) (n int64, err error) {
     for {
         select {
         case p = <-conn.chRead:
+            if nil == p {
+                log.Println("nil == p")
+                return
+            }
         case <-conn.rTimer.C:
             poolPutTimer(conn.rTimer, false)
             err = ErrTimeout
+            log.Println(err, conn.localAddr, conn.remoteAddr)
             return
         }
-        if nil == p {
+        log.Println("read", p.len)
+        if nil == conn.pcb {
+            log.Println("w.Write: nil == conn.pcb")
             return
         }
         for {
@@ -55,24 +64,38 @@ func (conn *TCPConn) WriteTo(w io.Writer) (n int64, err error) {
             n += int64(nw)
             if nil != err2 {
                 // 暂不处理临时错误的情况
+                C.tcp_abort(conn.pcb)
                 err = errors.New("write to: " + err2.Error())
+                log.Println(err)
                 return
             }
             if len(buf) != nw {
+                C.tcp_abort(conn.pcb)
                 err = io.ErrShortWrite
+                log.Println(err)
                 return
             }
-            if nil == p.next {
-                C.pbuf_free(p)
+            r := p
+            p = p.next
+            conn.is.Lock()
+            r.next = nil
+            C.tcp_recved(conn.pcb, r.len)
+            C.pbuf_free(r)
+            conn.is.Unlock()
+            if nil == p {
                 break
             } else {
-                p = p.next
+                // todo 构造测试数据，包括 udp
+                fmt.Println("debug: p.next")
             }
         }
     }
 }
 
 func (conn *TCPConn) ReadFrom(r io.Reader) (n int64, err error) {
+    conn.condSent.L.Lock()
+    defer conn.condSent.L.Unlock()
+
     b := make([]byte, 1500)
     for {
         nr, err2 := r.Read(b)
@@ -82,13 +105,27 @@ func (conn *TCPConn) ReadFrom(r io.Reader) (n int64, err error) {
             }
             break
         }
-        errno := C.tcp_write(conn.pcb, unsafe.Pointer(&b[0]), C.u16_t(len(b)), C.TCP_WRITE_FLAG_COPY)
+        if nil == conn.pcb {
+            log.Println("tcp_write: nil == conn.pcb")
+            break
+        }
+        conn.is.Lock()
+        errno := C.tcp_write(conn.pcb, unsafe.Pointer(&b[0]), C.u16_t(nr), C.TCP_WRITE_FLAG_COPY)
+        conn.is.Unlock()
         if errno == C.ERR_OK {
+
+            conn.is.Lock()
             C.tcp_output(conn.pcb)
+            conn.is.Unlock()
+
+            conn.condSent.Wait()
+
             n += int64(nr)
             continue
         } else {
+            C.tcp_abort(conn.pcb)
             err = errors.New("write error")
+            log.Println(err)
             break
         }
     }
@@ -97,19 +134,6 @@ func (conn *TCPConn) ReadFrom(r io.Reader) (n int64, err error) {
 
 func (conn *TCPConn) Read(b []byte) (int, error) {
     panic("implement me")
-    // select {
-    // case <-conn.rTimer.C:
-    //     return 0, ErrTimeout
-    // case bs := <-conn.chRead:
-    //     if nil == bs {
-    //         return 0, io.EOF
-    //     }
-    //     if len(b) < len(bs) {
-    //         return 0, io.ErrShortBuffer
-    //     }
-    //     copy(b, bs)
-    //     return len(bs), nil
-    // }
 }
 
 func (conn *TCPConn) Write(b []byte) (int, error) {
@@ -127,8 +151,30 @@ func (conn *TCPConn) Write(b []byte) (int, error) {
 }
 
 func (conn *TCPConn) Close() error {
-    fmt.Println("Close", conn.remoteAddr)
-    C.tcp_close(conn.pcb)
+
+    conn.is.Lock()
+    defer conn.is.Unlock()
+    fmt.Println("close tcp", conn.localAddr, conn.remoteAddr)
+
+    if nil == conn.pcb {
+        return ErrCloseClosed
+    }
+
+    // C.tcp_close(conn.pcb)
+    // C.tcp_shutdown(conn.pcb, 1, 1)
+    // 重复关闭，或者在不恰当的地方关闭，会导致访问冲突错误
+    // Process finished with exit code -1073740940 (0xC0000374)
+    conn.pcb = nil
+
+    close(conn.chRead)
+    for {
+        p := <-conn.chRead
+        if nil == p {
+            break
+        }
+        C.pbuf_free(p)
+    }
+
     return nil
 }
 
@@ -165,6 +211,11 @@ func newTcpConn(pcb *C.struct_tcp_pcb, is *ipStack) *TCPConn {
         condSent: sync.NewCond(new(sync.Mutex)),
     }
 
+    // (*TCPConn).Close 等同 func Close (*TCPConn) { } 即第一个参数是接收器
+    runtime.SetFinalizer(conn, (*TCPConn).Close)
+
+    is.Lock()
+    defer is.Unlock()
     C.tcp_arg_cgo(pcb, C.uintptr_t(uintptr(unsafe.Pointer(conn))))
     C.tcp_recv(pcb, Cptr(C.tcpRecvFn))
     C.tcp_sent(pcb, Cptr(C.tcpSentFn))

@@ -1,10 +1,8 @@
 package tun
 
 import (
-    "encoding/binary"
     "github.com/songgao/water"
     "io"
-    "net"
 )
 
 // type tap2tun struct {
@@ -55,75 +53,18 @@ import (
 //     return t.tap.Close()
 // }
 
-func OpenTunDevice(name, addr, gw, mask string, dnsServers []string, persist bool) (io.ReadWriteCloser, error) {
+func OpenTunDevice(name, subnet string, dnsServers string) (io.ReadWriteCloser, error) {
     cfg := water.Config{
         DeviceType: water.TUN,
         PlatformSpecificParams: water.PlatformSpecificParams{
             InterfaceName: name,
             ComponentID:   "tap0901",
+            Network: subnet,
+            DnsServers: dnsServers,
         },
     }
 
-    tunDev, err := water.New(cfg)
-    if err != nil {
-        return nil, err
-    }
-
-    // 如果适配器选项没有配置为 DHCP 自动获取，以下指令将不会生效
-
-    // set addr with dhcp
-    buffer := make([]byte, 4*4)
-    copy(buffer[0:], net.ParseIP(addr).To4())
-    copy(buffer[4:], net.ParseIP(mask).To4())
-    copy(buffer[8:], net.ParseIP(gw).To4())
-    // lease, 即租期(DHCP概念)
-    binary.BigEndian.PutUint32(buffer[12:], 60*60*24*365)
-    err = water.DeviceIoControl(7, buffer)
-    if err != nil {
-        tunDev.Close()
-        return nil, err
-    }
-
-    // 	primaryDNS := net.ParseIP(dnsServers[0]).To4()
-    // 	dnsParam := append([]byte{6, 4}, primaryDNS...)
-    // 	if len(dnsServers) >= 2 {
-    // 		secondaryDNS := net.ParseIP(dnsServers[1]).To4()
-    // 		dnsParam = append(dnsParam, secondaryDNS...)
-    // 		dnsParam[1] += 4
-    // 	}
-
-    // set dns with dhcp
-    buffer = make([]byte, 2+4)
-    buffer[0] = 6
-    buffer[1] = 4
-    copy(buffer[2:], net.ParseIP(dnsServers[0]).To4())
-    err = water.DeviceIoControl(9, buffer)
-    if err != nil {
-        tunDev.Close()
-        return nil, err
-    }
-
-    // set tun (default tap) mode
-    // tun 模式下不用处理 MAC 地址
-    buffer = make([]byte, 0, 12)
-    ipv4 := net.ParseIP(addr).To4()
-    buffer = append(buffer, ipv4...)
-    buffer = append(buffer, ipv4[0], ipv4[1], ipv4[2], 0)
-    buffer = append(buffer, net.ParseIP(mask).To4()...)
-    err = water.DeviceIoControl(10, buffer)
-    if err != nil {
-        tunDev.Close()
-        return nil, err
-    }
-
-    // set media status
-    buffer = []byte{1, 0, 0, 0}
-    err = water.DeviceIoControl(6, buffer)
-    if err != nil {
-        tunDev.Close()
-        return nil, err
-    }
+    return water.New(cfg)
 
     // return &tap2tun{tap: tapDev}, nil
-    return tunDev, nil
 }

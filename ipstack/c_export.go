@@ -13,35 +13,21 @@ import (
 
 //export udpRecvFn
 func udpRecvFn(arg unsafe.Pointer, pcb *C.struct_udp_pcb, p *C.struct_pbuf, addr *C.ip_addr_t, port C.u16_t, destAddr *C.ip_addr_t, destPort C.u16_t) {
-
-    if pcb == nil {
+    if p == nil {
+        log.Println("udpRecvFn", "buf == nil")
         return
     }
-
     var is = (*ipStack)(arg)
     conn := newUdpConn(pcb, addr, port, destAddr, destPort, is)
 
     go func() {
-        defer func() {
-            if p != nil {
-                C.pbuf_free(p)
-            }
-        }()
-
-        is.tunHandler.UdpHandle(conn)
-
-        for {
-            fmt.Println("udpRecvFn")
-            buf := (*[1 << 30]byte)(unsafe.Pointer(p.payload))[:p.len:p.len]
-            conn.chRead <- buf
-            if nil == p.next {
-                // C.tcp_recved(conn.pcb, p.tot_len)
-                break
-            } else {
-                p = p.next
-            }
-            conn.chRead <- buf
+        if nil != is.tunHandler.UdpHandle(conn) {
+            is.Lock()
+            defer is.Unlock()
+            C.pbuf_free(p)
+            return
         }
+        conn.chRead <- p
     }()
 }
 
@@ -49,11 +35,15 @@ func udpRecvFn(arg unsafe.Pointer, pcb *C.struct_udp_pcb, p *C.struct_pbuf, addr
 func tcpAcceptFn(arg unsafe.Pointer, pcb *C.struct_tcp_pcb, err C.err_t) C.err_t {
     go func() {
         var is = (*ipStack)(arg)
-        is.tunHandler.TcpHandle(newTcpConn(pcb, is))
-        // if nil != err {
-        //     C.tcp_abort(pcb)
-        // }
-        if pcb.refused_data != nil {
+
+        err := is.tunHandler.TcpHandle(newTcpConn(pcb, is))
+
+        is.Lock()
+        defer is.Unlock()
+
+        if nil != err {
+            C.tcp_abort(pcb)
+        } else if nil != pcb.refused_data {
             C.tcp_process_refused_data(pcb)
         }
     }()
@@ -69,16 +59,39 @@ func tcpRecvFn(arg unsafe.Pointer, tpcb *C.struct_tcp_pcb, p *C.struct_pbuf, err
 
     var conn = (*TCPConn)(arg)
 
-    // EOF
-    if nil == p {
-        close(conn.chRead)
-        C.tcp_close(tpcb)
-        return err
+    if nil == conn.pcb {
+        if nil != p {
+            C.pbuf_free(p)
+        }
+        return C.ERR_OK
     }
 
+    // EOF
+    if nil == p {
+        // close(conn.chRead)
+        conn.chRead <- nil
+        // 如果关闭之后对面还发 RST 过来 lwip 会闪退
+        // C.tcp_close(tpcb)
+        // 都不要 close 除了 Close 方法和析构函数
+        // C.tcp_shutdown(tpcb, 0, 1)
+        // tcpPollFn 停止意味着 lwip 将其释放了
+        // todo 在源码中找到资源变量，确保所有内存在控制中
+        return C.ERR_OK
+    }
 
-    conn.chRead <- p
-    C.tcp_recved(conn.pcb, p.tot_len)
+    if len(conn.chRead) < 8 {
+        fmt.Println("tcpRecvFn", conn.remoteAddr, unsafe.Pointer(p))
+        conn.chRead <- p
+    } else {
+        log.Println("tcpRecvFn", "ERR_CONN")
+        // Tell lwip we can't receive data at the moment, lwip will store it and try again later.
+        return C.ERR_CONN
+    }
+
+    // for len(conn.chRead) > 0 {
+    //     log.Println("debug: len(conn.chRead) > 0")
+    //     time.Sleep(time.Millisecond * 50)
+    // }
 
     return C.ERR_OK
 }
@@ -86,22 +99,24 @@ func tcpRecvFn(arg unsafe.Pointer, tpcb *C.struct_tcp_pcb, p *C.struct_pbuf, err
 //export tcpSentFn
 func tcpSentFn(arg unsafe.Pointer, tpcb *C.struct_tcp_pcb, len C.u16_t) C.err_t {
     var conn = (*TCPConn)(arg)
-    fmt.Println("tcpSentFn")
     conn.condSent.Signal()
-    // C.tcp_close(conn.pcb)
     return C.ERR_OK
 }
 
 //export tcpErrFn
 func tcpErrFn(arg unsafe.Pointer, errno C.err_t) {
     var conn = (*TCPConn)(arg)
+    if nil != conn.pcb {
+        conn.pcb = nil
+        conn.chRead <- nil
+    }
     switch errno {
     case C.ERR_RST:
-        fmt.Println("ERR_RST: the connection was reset by the remote host", conn.remoteAddr)
+        fmt.Println("ERR_RST: the connection was reset by the remote host", conn.localAddr, conn.remoteAddr)
     case C.ERR_ABRT:
-        fmt.Println("ERR_ABRT: aborted through tcp_abort or by a TCP timer", conn.remoteAddr)
+        fmt.Println("ERR_ABRT: aborted through tcp_abort or by a TCP timer", conn.localAddr, conn.remoteAddr)
     default:
-        fmt.Println("tcpErrFn", errno, conn.remoteAddr)
+        fmt.Println("tcpErrFn", errno, conn.localAddr, conn.remoteAddr)
     }
 }
 

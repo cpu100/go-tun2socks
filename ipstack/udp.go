@@ -10,6 +10,7 @@ import (
     "fmt"
     "io"
     "net"
+    "runtime"
     "time"
     "unsafe"
 )
@@ -18,10 +19,10 @@ type UDPConn struct {
     localAddr  *net.UDPAddr
     remoteAddr *net.UDPAddr
 
-    chRead chan []byte
+    chRead chan *C.struct_pbuf
 
-    readDeadline  time.Time
-    writeDeadline time.Time
+    rTimer    *time.Timer
+    rDuration time.Duration
 
     is  *ipStack
     pcb *C.struct_udp_pcb
@@ -36,23 +37,27 @@ type UDPConn struct {
 // }
 
 func (conn *UDPConn) Read(b []byte) (n int, err error) {
-    bs := <-conn.chRead
-    if nil == bs {
-        return 0, io.EOF
+    select {
+    case <-conn.rTimer.C:
+        poolPutTimer(conn.rTimer, false)
+        return 0, ErrTimeout
+    case p := <-conn.chRead:
+        buf := (*[1 << 30]byte)(unsafe.Pointer(p.payload))[:p.len:p.len]
+        if len(b) < len(buf) {
+            return 0, io.ErrShortBuffer
+        }
+        copy(b, buf)
+        C.pbuf_free(p)
+        return len(buf), nil
     }
-    if len(b) < len(bs) {
-        return 0, io.ErrShortBuffer
-    }
-    copy(b, bs)
-    return len(bs), nil
 }
 
 func (conn *UDPConn) Write(b []byte) (int, error) {
-    buf := C.pbuf_alloc_reference(unsafe.Pointer(&b[0]), C.u16_t(len(b)), C.PBUF_ROM)
-    defer C.pbuf_free(buf)
-
     conn.is.Lock()
     defer conn.is.Unlock()
+
+    buf := C.pbuf_alloc_reference(unsafe.Pointer(&b[0]), C.u16_t(len(b)), C.PBUF_ROM)
+    defer C.pbuf_free(buf)
 
     if len(conn.localAddr.IP) == 4 {
         C.ip_addr_type_set(&conn.pcb.local_ip, C.IPADDR_TYPE_V4)
@@ -77,16 +82,35 @@ func (conn *UDPConn) Write(b []byte) (int, error) {
     )
 
     if err != C.ERR_OK {
-        return 0, errors.New("write error")
+        return 0, errors.New("udp send error")
     }
     return len(b), nil
 }
 
 func (conn *UDPConn) Close() error {
+    conn.is.Lock()
+    defer conn.is.Unlock()
+    fmt.Println("close udp", conn.localAddr, conn.remoteAddr)
+
+    if nil == conn.pcb {
+        return ErrCloseClosed
+    }
+
+    // C.tcp_close(conn.pcb)
     // C.udp_remove(conn.pcb)
-    // udp 的 pcb 的公共的
+    // udp 的 pcb 是公共的，只有一个
     // 不像 tcp 那样有新的 pcb 持续保留到连接关闭
-    fmt.Println("Close", conn.remoteAddr)
+    conn.pcb = nil
+
+    close(conn.chRead)
+    for {
+        p := <-conn.chRead
+        if nil == p {
+            break
+        }
+        C.pbuf_free(p)
+    }
+
     return nil
 }
 
@@ -99,27 +123,30 @@ func (conn *UDPConn) RemoteAddr() net.Addr {
 }
 
 func (conn *UDPConn) SetDeadline(t time.Time) error {
-    conn.readDeadline = t
-    conn.writeDeadline = t
-    return nil
+    panic("implement me")
 }
 
 func (conn *UDPConn) SetReadDeadline(t time.Time) error {
-    conn.readDeadline = t
+    conn.rDuration = t.Sub(time.Now())
+    if nil != conn.rTimer {
+        poolPutTimer(conn.rTimer, true)
+    }
+    conn.rTimer = poolGetTimer(conn.rDuration)
     return nil
 }
 
 func (conn *UDPConn) SetWriteDeadline(t time.Time) error {
-    conn.writeDeadline = t
-    return nil
+    panic("implement me")
 }
 
 func newUdpConn(pcb *C.struct_udp_pcb, addr *C.ip_addr_t, port C.u16_t, destAddr *C.ip_addr_t, destPort C.u16_t, is *ipStack) *UDPConn {
     conn := &UDPConn{
         is:     is,
         pcb:    pcb,
-        chRead: make(chan []byte, 3),
+        chRead: make(chan *C.struct_pbuf, 8),
     }
+
+    runtime.SetFinalizer(conn, (*UDPConn).Close)
 
     var remoteIp, localIp net.IP
     if C.IPADDR_TYPE_V4 == C.ip_addr_type(addr) {

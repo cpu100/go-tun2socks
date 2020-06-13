@@ -1,5 +1,7 @@
 package ipstack
 
+import "errors"
+
 type errTimeout struct {
 }
 
@@ -17,3 +19,4 @@ func (e *errTimeout) Temporary() bool {
 
 //
 var ErrTimeout = new(errTimeout)
+var ErrCloseClosed = errors.New("close closed connection")

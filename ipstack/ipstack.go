@@ -34,12 +34,14 @@ err_t netif_input_cgo(struct pbuf *buf, struct netif *netif) {
 }
 
 // 修改 .c .h 文件后
-;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 // 在这里随便加几个分号即可清除 C 代码编译的缓存
 
 */
 import "C"
 import (
+    "encoding/binary"
+    "log"
     "sync"
     "unsafe"
 )
@@ -54,6 +56,18 @@ func SetTunHandler(th TunHandler, thread int) {
             if nil != err {
                 panic(err)
             }
+
+            protocol := buffer[9]
+            if 1 != protocol && 6 != protocol && 17 != protocol {
+                log.Fatalln("Protocol", protocol)
+            }
+            // ip := buffer[16:20]
+            port := binary.BigEndian.Uint16(buffer[22:24])
+            if port == 0 {
+                log.Fatalln("Port", port)
+            }
+
+            is.Lock()
             var buf *C.struct_pbuf
             buf = C.pbuf_alloc(C.PBUF_RAW, C.u16_t(nr), C.PBUF_POOL)
             C.pbuf_take(buf, unsafe.Pointer(&buffer[0]), C.u16_t(nr))
@@ -62,8 +76,52 @@ func SetTunHandler(th TunHandler, thread int) {
                 C.pbuf_free(buf)
                 panic(ierr)
             }
+            is.Unlock()
         }
     }()
+    // thread = 1
+    // var iss []*ipStack
+    // var netifs []*C.struct_netif
+    // var chBuffers []chan[]byte
+    // for i := 0; i < thread; i++ {
+    //     is := newIpStack(th)
+    //     is.init()
+    //     iss = append(iss, is)
+    //     netifs = append(netifs, is.netif)
+    //     chBuffers = append(chBuffers, make(chan []byte))
+    //     go func(i int) {
+    //         netif := netifs[i]
+    //         chBuffer := chBuffers[i]
+    //         for {
+    //             buffer := <-chBuffer
+    //             nr := len(buffer)
+    //             var buf *C.struct_pbuf
+    //             buf = C.pbuf_alloc(C.PBUF_RAW, C.u16_t(nr), C.PBUF_POOL)
+    //             C.pbuf_take(buf, unsafe.Pointer(&buffer[0]), C.u16_t(nr))
+    //             ierr := C.netif_input_cgo(buf, netif)
+    //             if ierr != C.ERR_OK {
+    //                 C.pbuf_free(buf)
+    //                 panic(ierr)
+    //             }
+    //         }
+    //     }(i)
+    // }
+    // go func() {
+    //     buffer2 := make([]byte, 1500)
+    //     for {
+    //         _, err := th.Read(buffer2)
+    //         if nil != err {
+    //             panic(err)
+    //         }
+    //         // todo if ipv6
+    //         i := binary.LittleEndian.Uint32(buffer2[16:20])%uint32(len(netifs))
+    //         buffer := append(make([]byte, 0, len(buffer2)), buffer2...)
+    //         chBuffers[i] <- buffer
+    //         // fmt.Println(buffer[16:20])
+    //         // fmt.Println("netif", i, len(netifs))
+    //
+    //     }
+    // }()
     return
 }
 
@@ -115,5 +173,16 @@ func (is *ipStack) init() {
         panic("udp_bind error")
     }
 
-    C.udp_recv_cgo(udpPCB, Cptr(C.udpRecvFn), C.ulonglong(uintptr(unsafe.Pointer(is))))
+    C.udp_recv_cgo(udpPCB, Cptr(C.udpRecvFn), C.uintptr_t(uintptr(unsafe.Pointer(is))))
+}
+
+func init() {
+    C.lwip_init()
+    // go func() {
+    //     ticker := time.NewTicker(time.Millisecond * 200)
+    //     for {
+    //         <-ticker.C
+    //         C.sys_check_timeouts()
+    //     }
+    // }()
 }
